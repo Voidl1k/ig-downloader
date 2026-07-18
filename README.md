@@ -33,3 +33,25 @@ contexto (botão direito).
   opção no menu de contexto.
 - Não há requisição a nenhum servidor externo além do próprio CDN do
   Instagram — tudo roda localmente no navegador.
+
+## Limitações e avisos
+
+- O Instagram muda o HTML do site com frequência; se o botão parar de
+  aparecer em algum tipo de página, me avisa que eu ajusto os seletores.
+- Stories somem da API do Instagram depois de um tempo — baixe na hora que
+  estiver vendo.
+- Algumas mídias em qualidade muito alta (carrosséis, certos reels) podem
+  vir em resolução um pouco menor que a original, dependendo do que o
+  Instagram carregou no navegador naquele momento.
+- Baixar conteúdo de terceiros pode esbarrar nos Termos de Uso do Instagram
+  e em direitos autorais de quem postou. Use para salvar posts seus, ou
+  conteúdo de terceiros só quando tiver permissão / for para uso pessoal.
+  A extensão não contorna login, privacidade ou autenticação — ela só
+  baixa o que já está carregado e visível na tela.
+
+## Publicar na Chrome Web Store (opcional)
+
+Se quiser publicar, vai precisar de uma conta de desenvolvedor (taxa única
+de US$5) e revisar a política da Google para extensões de download de
+mídia de redes sociais — algumas categorias exigem justificativa extra na
+descrição da loja.

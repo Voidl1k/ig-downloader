@@ -35,3 +35,41 @@
     transform: scale(1);
   }
 }
+
+/* botão inline, ao lado do ícone de "Salvar" do Instagram */
+.ig-dl-inline-btn {
+  all: unset;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-left: 10px;
+  cursor: pointer;
+  color: #dc2776;
+  vertical-align: middle;
+}
+
+.ig-dl-inline-btn svg {
+  width: 22px;
+  height: 22px;
+  display: block;
+}
+
+.ig-dl-inline-btn:hover {
+  opacity: 0.7;
+}
+
+.ig-dl-inline-btn.ig-dl-loading {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.ig-dl-inline-btn.ig-dl-ok {
+  color: #22c55e;
+}
+
+.ig-dl-inline-btn.ig-dl-err {
+  color: #ef4444;
+}
