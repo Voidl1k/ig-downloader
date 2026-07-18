@@ -112,6 +112,7 @@
 
   async function downloadViaFetch(url, type, filenameBase) {
     try {
+      log("Tentando fetch direto:", url);
       const res = await fetch(url, { 
         mode: 'cors',
         credentials: 'include',
@@ -119,56 +120,109 @@
           'Accept': type === 'video' ? 'video/*' : 'image/*'
         }
       });
-      if (!res.ok) throw new Error("HTTP " + res.status);
+      if (!res.ok) {
+        throw new Error("HTTP " + res.status + " " + res.statusText);
+      }
+      log("Fetch bem-sucedido, status:", res.status);
       const blob = await res.blob();
+      log("Blob recebido, tamanho:", blob.size, "tipo:", blob.type);
       const guessedExt = (blob.type.split("/")[1] || (type === "video" ? "mp4" : "jpg")).replace("jpeg", "jpg");
+      const filename = `${filenameBase}.${guessedExt}`;
+      log("Criando download blob com nome:", filename);
       const blobUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = blobUrl;
-      a.download = `${filenameBase}.${guessedExt}`;
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(blobUrl), 15000);
+      log("Download via fetch concluído com sucesso");
       return true;
     } catch (err) {
-      warn("fetch direto também falhou:", err);
+      warn("fetch direto também falhou:", err.message);
       return false;
     }
   }
 
   async function performDownload(url, type) {
-    if (!url || !/^https?:\/\//.test(url)) {
+    if (!url) {
+      warn("URL vazia, não é possível baixar");
+      return false;
+    }
+
+    // Blob URLs devem ser processadas localmente (content script tem acesso)
+    if (url.startsWith("blob:")) {
+      log("Detectado blob URL, processando localmente:", url);
+      return downloadViaFetch(url, type, `instagram_${Date.now()}`);
+    }
+
+    if (!/^https?:\/\//.test(url)) {
       warn("URL inválida, não é possível baixar:", url);
       return false;
     }
 
-    log("baixando:", url);
+    log("Iniciando download individual:", url, "tipo:", type);
 
     const resp = await new Promise((resolve) => {
-      chrome.runtime.sendMessage({ action: "download", url, type }, resolve);
+      chrome.runtime.sendMessage({ action: "download", url, type }, (response) => {
+        log("Resposta do background:", response);
+        resolve(response);
+      });
     });
 
-    if (resp?.ok) return true;
+    if (resp?.ok) {
+      log("Download individual concluído com sucesso");
+      return true;
+    }
 
-    warn("falha via chrome.downloads, tentando fetch direto:", resp?.error);
+    warn("Falha via chrome.downloads, tentando fetch direto:", resp?.error);
     return downloadViaFetch(url, type, `instagram_${Date.now()}`);
   }
 
   async function performDownloadBatch(items) {
-    if (!items.length) return false;
+    if (!items.length) {
+      warn("Lista de downloads vazia");
+      return false;
+    }
+
+    log("Iniciando download em lote de", items.length, "itens");
+
+    // Separa blobs (processados localmente) de URLs normais (enviadas ao background)
+    const blobItems = items.filter(item => item.url.startsWith("blob:"));
+    const httpItems = items.filter(item => !item.url.startsWith("blob:") && /^https?:\/\//.test(item.url));
+    
+    if (blobItems.length > 0) {
+      log("Processando", blobItems.length, "blob URLs localmente");
+      const stamp = Date.now();
+      for (let i = 0; i < blobItems.length; i++) {
+        await downloadViaFetch(blobItems[i].url, blobItems[i].type, `instagram_${stamp}_${String(i + 1).padStart(2, "0")}`);
+      }
+    }
+
+    if (httpItems.length === 0) {
+      log("Todos os itens eram blobs, download concluído");
+      return true;
+    }
 
     const resp = await new Promise((resolve) => {
-      chrome.runtime.sendMessage({ action: "downloadBatch", items }, resolve);
+      chrome.runtime.sendMessage({ action: "downloadBatch", items: httpItems }, (response) => {
+        log("Resposta do background:", response);
+        resolve(response);
+      });
     });
 
-    if (resp?.ok) return true;
+    if (resp?.ok) {
+      log("Lote baixado com sucesso via chrome.downloads");
+      return true;
+    }
 
-    warn("lote falhou via chrome.downloads, tentando fetch direto item a item:", resp?.error);
+    warn("Lote falhou via chrome.downloads, tentando fetch direto item a item:", resp?.error);
     const stamp = Date.now();
     let anyOk = false;
-    for (let i = 0; i < items.length; i++) {
-      const ok = await downloadViaFetch(items[i].url, items[i].type, `instagram_${stamp}_${String(i + 1).padStart(2, "0")}`);
+    for (let i = 0; i < httpItems.length; i++) {
+      log("Baixando item", i + 1, "de", httpItems.length, ":", httpItems[i].url);
+      const ok = await downloadViaFetch(httpItems[i].url, httpItems[i].type, `instagram_${stamp}_${String(i + 1).padStart(2, "0")}`);
       anyOk = anyOk || ok;
     }
     return anyOk;
@@ -431,7 +485,9 @@
   let storyBtn = null;
 
   function isStoryOrHighlight() {
-    return /\/stories\//.test(location.pathname);
+    const isStory = /\/stories\//.test(location.pathname);
+    log("Verificando se é story/highlight:", location.pathname, "=>", isStory);
+    return isStory;
   }
 
   // identifica a "sessão" atual de story (mesmo usuário ou mesmo destaque),
@@ -449,18 +505,31 @@
     document.querySelectorAll("video").forEach((el) => {
       if (!isVisible(el)) return;
       const rect = el.getBoundingClientRect();
-      candidates.push({ el, type: "video", area: rect.width * rect.height });
+      const area = rect.width * rect.height;
+      if (area > 0) {
+        candidates.push({ el, type: "video", area });
+        log("Video encontrado:", el.src || el.currentSrc, "área:", area);
+      }
     });
 
     document.querySelectorAll('img[srcset], img[src]').forEach((el) => {
       if (isAvatarLike(el) || !isVisible(el)) return;
       const rect = el.getBoundingClientRect();
-      candidates.push({ el, type: "image", area: rect.width * rect.height });
+      const area = rect.width * rect.height;
+      if (area > 0) {
+        candidates.push({ el, type: "image", area });
+        log("Imagem encontrada:", getBestImageUrl(el), "área:", area);
+      }
     });
 
-    if (!candidates.length) return null;
+    if (!candidates.length) {
+      warn("Nenhuma mídia encontrada neste story");
+      return null;
+    }
     candidates.sort((a, b) => b.area - a.area);
-    return candidates[0];
+    const selected = candidates[0];
+    log("Mídia de story selecionada:", selected.type, "área:", selected.area);
+    return selected;
   }
 
   async function collectStorySet() {
@@ -524,13 +593,19 @@
   function ensureStoryButton() {
     if (!isStoryOrHighlight()) {
       if (storyBtn) {
+        log("Removendo botão de story - não estamos em story/highlight");
         storyBtn.remove();
         storyBtn = null;
       }
       return;
     }
 
-    if (storyBtn && document.body.contains(storyBtn)) return;
+    if (storyBtn && document.body.contains(storyBtn)) {
+      log("Botão de story já existe");
+      return;
+    }
+
+    log("Criando novo botão de story");
 
     storyBtn = document.createElement("button");
     storyBtn.type = "button";
