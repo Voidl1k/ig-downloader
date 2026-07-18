@@ -112,7 +112,13 @@
 
   async function downloadViaFetch(url, type, filenameBase) {
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, { 
+        mode: 'cors',
+        credentials: 'include',
+        headers: {
+          'Accept': type === 'video' ? 'video/*' : 'image/*'
+        }
+      });
       if (!res.ok) throw new Error("HTTP " + res.status);
       const blob = await res.blob();
       const guessedExt = (blob.type.split("/")[1] || (type === "video" ? "mp4" : "jpg")).replace("jpeg", "jpg");
@@ -230,8 +236,17 @@
   // ---------- carrossel de posts (feed) ----------
 
   async function collectCarousel(scopedContainer) {
+    // Encontra o índice do slide atual para retornar a ele ao final
+    const initialMedia = getMediaForContainer(scopedContainer);
+    const initialUrl = initialMedia 
+      ? (initialMedia.type === "video" ? initialMedia.el.currentSrc || initialMedia.el.src : getBestImageUrl(initialMedia.el))
+      : null;
+
+    let currentIndex = 0;
     let backSteps = 0;
     let guard = 0;
+    
+    // Volta para o primeiro slide para começar a coleta
     while (guard++ < 20) {
       const prev = findNavButton(scopedContainer, PREV_RE);
       if (!prev) break;
@@ -243,6 +258,8 @@
     const collected = [];
     const seenUrls = new Set();
     guard = 0;
+    
+    // Coleta todos os slides do carrossel
     while (guard++ < 20) {
       const media = getMediaForContainer(scopedContainer);
       if (media) {
@@ -258,6 +275,7 @@
       await sleep(350);
     }
 
+    // Volta para a posição inicial (ou próxima a ela)
     for (let i = 0; i < backSteps; i++) {
       const next = findNavButton(scopedContainer, NEXT_RE);
       if (!next) break;
@@ -267,6 +285,9 @@
 
     return collected;
   }
+
+  // Armazena o contexto do clique para identificar a mídia visível naquele momento
+  let lastMediaSnapshot = null;
 
   // ---------- botão flutuante sobre a mídia (feed / reels sem ícone de salvar) ----------
 
@@ -364,22 +385,22 @@
         e.stopPropagation();
         e.stopImmediatePropagation();
 
+        // Captura a mídia visível NAQUELE MOMENTO do clique
+        const currentMedia = getMediaForContainer(scoped) || media;
+        const currentUrl = currentMedia.type === "video" ? currentMedia.el.currentSrc || currentMedia.el.src : getBestImageUrl(currentMedia.el);
+        lastMediaSnapshot = { url: currentUrl, type: currentMedia.type, element: currentMedia.el };
+
         const hasCarousel = !!findNavButton(scoped, NEXT_RE) || !!findNavButton(scoped, PREV_RE);
 
         if (!hasCarousel) {
-          const current = getMediaForContainer(scoped) || media;
-          const url =
-            current.type === "video" ? current.el.currentSrc || current.el.src : getBestImageUrl(current.el);
-          downloadSingle(btn, url, current.type);
+          downloadSingle(btn, currentUrl, currentMedia.type);
           return;
         }
 
         showChoiceMenu(btn, "Baixar só esta foto", "Baixar todas do carrossel", async (choice) => {
           if (choice === "current") {
-            const current = getMediaForContainer(scoped) || media;
-            const url =
-              current.type === "video" ? current.el.currentSrc || current.el.src : getBestImageUrl(current.el);
-            downloadSingle(btn, url, current.type);
+            // Usa a captura feita no momento do clique, não busca novamente
+            downloadSingle(btn, lastMediaSnapshot.url, lastMediaSnapshot.type);
             return;
           }
 
@@ -522,22 +543,23 @@
       e.stopPropagation();
       e.stopImmediatePropagation();
 
+      // Captura a mídia visível NAQUELE MOMENTO do clique
+      const currentMedia = getCurrentStoryMedia();
+      if (!currentMedia) return;
+      const currentUrl = currentMedia.type === "video" ? currentMedia.el.currentSrc || currentMedia.el.src : getBestImageUrl(currentMedia.el);
+      lastMediaSnapshot = { url: currentUrl, type: currentMedia.type, element: currentMedia.el };
+
       const hasMore = !!findNavButton(document, NEXT_RE) || !!findNavButton(document, PREV_RE);
 
       if (!hasMore) {
-        const media = getCurrentStoryMedia();
-        if (!media) return;
-        const url = media.type === "video" ? media.el.currentSrc || media.el.src : getBestImageUrl(media.el);
-        downloadSingle(storyBtn, url, media.type);
+        downloadSingle(storyBtn, currentUrl, currentMedia.type);
         return;
       }
 
-      showChoiceMenu(storyBtn, "Baixar apenas esta foto", "Baixar todas as fotos do story", async (choice) => {
+      showChoiceMenu(storyBtn, "Baixar apenas este story", "Baixar todos os stories do usuário", async (choice) => {
         if (choice === "current") {
-          const media = getCurrentStoryMedia();
-          if (!media) return;
-          const url = media.type === "video" ? media.el.currentSrc || media.el.src : getBestImageUrl(media.el);
-          downloadSingle(storyBtn, url, media.type);
+          // Usa a captura feita no momento do clique
+          downloadSingle(storyBtn, lastMediaSnapshot.url, lastMediaSnapshot.type);
           return;
         }
 
