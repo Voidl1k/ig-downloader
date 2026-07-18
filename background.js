@@ -28,6 +28,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .catch((err) => sendResponse({ ok: false, error: String(err) }));
     return true; // resposta assíncrona
   }
+
+  if (msg?.action === "downloadBatch" && Array.isArray(msg.items) && msg.items.length) {
+    downloadBatch(msg.items)
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true;
+  }
 });
 
 function guessTypeFromUrl(url) {
@@ -57,4 +64,22 @@ function downloadMedia(url, type) {
       }
     });
   });
+}
+
+async function downloadBatch(items) {
+  const stamp = Date.now();
+  for (let i = 0; i < items.length; i++) {
+    const { url, type } = items[i];
+    const ext = guessExtension(url, type);
+    const filename = `IG-Downloader/carrossel_${stamp}_${String(i + 1).padStart(2, "0")}.${ext}`;
+    await new Promise((resolve, reject) => {
+      chrome.downloads.download({ url, filename, saveAs: false }, (downloadId) => {
+        if (chrome.runtime.lastError || downloadId === undefined) {
+          reject(chrome.runtime.lastError?.message || "Falha ao iniciar o download");
+        } else {
+          resolve(downloadId);
+        }
+      });
+    });
+  }
 }

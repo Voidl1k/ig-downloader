@@ -2,11 +2,17 @@
 
 (function () {
   const MIN_RENDER_SIZE = 120; // px renderizados na tela — abaixo disso, é avatar/ícone
+  const NEXT_RE = /^(avançar|próximo|next)/i;
+  const PREV_RE = /^(voltar|anterior|go back|previous)/i;
 
   const DOWNLOAD_SVG =
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
     'stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">' +
     '<path d="M12 3v12"></path><path d="M7 11l5 5 5-5"></path><path d="M4 19h16"></path></svg>';
+
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
 
   function getBestImageUrl(img) {
     if (img.srcset) {
@@ -31,17 +37,13 @@
     return style.visibility !== "hidden" && style.display !== "none";
   }
 
-  // detecta avatares/fotos de perfil (de quem postou, curtiu, comentou etc.)
   function isAvatarLike(img) {
-    if (img.closest('header, nav')) return true;
+    if (img.closest("header, nav")) return true;
 
-    // renderizado pequeno na tela = quase certeza que é avatar/ícone,
-    // mesmo que o arquivo original seja de alta resolução
     const rect = img.getBoundingClientRect();
     const renderedSize = Math.max(rect.width, rect.height);
     if (renderedSize > 0 && renderedSize < MIN_RENDER_SIZE) return true;
 
-    // imagem dentro de um link para perfil (/usuario/) em vez de post (/p/, /reel/)
     const link = img.closest("a[href]");
     if (link) {
       const href = link.getAttribute("href") || "";
@@ -50,7 +52,6 @@
       }
     }
 
-    // atributos comuns em avatares
     const alt = (img.getAttribute("alt") || "").toLowerCase();
     if (/foto do perfil|profile photo|profile picture/.test(alt)) return true;
 
@@ -74,7 +75,113 @@
     );
   }
 
-  // ---------- botão flutuante sobre a mídia (fallback: stories etc.) ----------
+  function findNavButton(container, re) {
+    const svg = Array.from(container.querySelectorAll("svg[aria-label]")).find((s) =>
+      re.test(s.getAttribute("aria-label") || "")
+    );
+    if (!svg) return null;
+    return svg.closest('button, div[role="button"]') || svg.parentElement;
+  }
+
+  function downloadSingle(btn, url, type) {
+    if (!url) return;
+    btn.classList.add("ig-dl-loading");
+    chrome.runtime.sendMessage({ action: "download", url, type }, (resp) => {
+      btn.classList.remove("ig-dl-loading");
+      btn.classList.add(resp?.ok ? "ig-dl-ok" : "ig-dl-err");
+      setTimeout(() => btn.classList.remove("ig-dl-ok", "ig-dl-err"), 1200);
+    });
+  }
+
+  // ---------- menu "baixar esta / baixar todas" para carrossel ----------
+
+  function showCarouselMenu(anchorBtn, onChoice) {
+    document.querySelectorAll(".ig-dl-menu").forEach((m) => m.remove());
+
+    const menu = document.createElement("div");
+    menu.className = "ig-dl-menu";
+
+    const optCurrent = document.createElement("button");
+    optCurrent.type = "button";
+    optCurrent.className = "ig-dl-menu-item";
+    optCurrent.textContent = "Baixar só esta foto";
+
+    const optAll = document.createElement("button");
+    optAll.type = "button";
+    optAll.className = "ig-dl-menu-item";
+    optAll.textContent = "Baixar todas do carrossel";
+
+    const close = () => {
+      menu.remove();
+      document.removeEventListener("click", outsideClick, true);
+    };
+
+    optCurrent.addEventListener("click", (e) => {
+      e.stopPropagation();
+      close();
+      onChoice("current");
+    });
+    optAll.addEventListener("click", (e) => {
+      e.stopPropagation();
+      close();
+      onChoice("all");
+    });
+
+    function outsideClick(e) {
+      if (!menu.contains(e.target) && e.target !== anchorBtn) close();
+    }
+
+    menu.appendChild(optCurrent);
+    menu.appendChild(optAll);
+    document.body.appendChild(menu);
+
+    const rect = anchorBtn.getBoundingClientRect();
+    menu.style.top = `${rect.bottom + window.scrollY + 6}px`;
+    menu.style.left = `${Math.min(rect.left + window.scrollX, window.innerWidth - 210)}px`;
+
+    setTimeout(() => document.addEventListener("click", outsideClick, true), 0);
+  }
+
+  async function collectCarousel(container) {
+    let backSteps = 0;
+    let guard = 0;
+    while (guard++ < 20) {
+      const prev = findNavButton(container, PREV_RE);
+      if (!prev) break;
+      prev.click();
+      backSteps++;
+      await sleep(300);
+    }
+
+    const collected = [];
+    const seenUrls = new Set();
+    guard = 0;
+    while (guard++ < 20) {
+      const media = getMediaForContainer(container);
+      if (media) {
+        const url = media.type === "video" ? media.el.currentSrc || media.el.src : getBestImageUrl(media.el);
+        if (url && !seenUrls.has(url)) {
+          seenUrls.add(url);
+          collected.push({ url, type: media.type });
+        }
+      }
+      const next = findNavButton(container, NEXT_RE);
+      if (!next) break;
+      next.click();
+      await sleep(350);
+    }
+
+    for (let i = 0; i < backSteps; i++) {
+      const next = findNavButton(container, NEXT_RE);
+      if (!next) break;
+      next.click();
+      await sleep(150);
+    }
+
+    return collected;
+  }
+
+  // ---------- botão flutuante sobre a mídia (feed / reels sem ícone de salvar) ----------
 
   function makeOverlayButton() {
     const btn = document.createElement("button");
@@ -121,7 +228,7 @@
     wrapper.appendChild(btn);
   }
 
-  // ---------- botão ao lado do ícone de "Salvar" do Instagram ----------
+  // ---------- botão ao lado do ícone de "Salvar" do Instagram (posts / reels) ----------
 
   function getMediaForContainer(container) {
     const videos = Array.from(container.querySelectorAll("video")).filter(isVisible);
@@ -155,7 +262,7 @@
       if (!media) return;
 
       clickable.dataset.igDlSibling = "1";
-      media.el.dataset.igDlDone = "1"; // evita duplicar com o botão flutuante
+      media.el.dataset.igDlDone = "1";
 
       const btn = document.createElement("button");
       btn.type = "button";
@@ -168,14 +275,39 @@
         e.stopPropagation();
         e.stopImmediatePropagation();
 
-        const url = media.type === "video" ? media.el.currentSrc || media.el.src : getBestImageUrl(media.el);
-        if (!url) return;
+        const hasCarousel = !!findNavButton(container, NEXT_RE) || !!findNavButton(container, PREV_RE);
 
-        btn.classList.add("ig-dl-loading");
-        chrome.runtime.sendMessage({ action: "download", url, type: media.type }, (resp) => {
+        if (!hasCarousel) {
+          const current = getMediaForContainer(container) || media;
+          const url =
+            current.type === "video" ? current.el.currentSrc || current.el.src : getBestImageUrl(current.el);
+          downloadSingle(btn, url, current.type);
+          return;
+        }
+
+        showCarouselMenu(btn, async (choice) => {
+          if (choice === "current") {
+            const current = getMediaForContainer(container) || media;
+            const url =
+              current.type === "video" ? current.el.currentSrc || current.el.src : getBestImageUrl(current.el);
+            downloadSingle(btn, url, current.type);
+            return;
+          }
+
+          btn.classList.add("ig-dl-loading");
+          const items = await collectCarousel(container);
           btn.classList.remove("ig-dl-loading");
-          btn.classList.add(resp?.ok ? "ig-dl-ok" : "ig-dl-err");
-          setTimeout(() => btn.classList.remove("ig-dl-ok", "ig-dl-err"), 1200);
+
+          if (!items.length) {
+            btn.classList.add("ig-dl-err");
+            setTimeout(() => btn.classList.remove("ig-dl-err"), 1200);
+            return;
+          }
+
+          chrome.runtime.sendMessage({ action: "downloadBatch", items }, (resp) => {
+            btn.classList.add(resp?.ok ? "ig-dl-ok" : "ig-dl-err");
+            setTimeout(() => btn.classList.remove("ig-dl-ok", "ig-dl-err"), 1200);
+          });
         });
       });
 
@@ -183,9 +315,72 @@
     });
   }
 
+  // ---------- botão fixo para Stories e Destaques (/stories/...) ----------
+
+  let storyBtn = null;
+
+  function isStoryOrHighlight() {
+    return /\/stories\//.test(location.pathname);
+  }
+
+  function getCurrentStoryMedia() {
+    const candidates = [];
+
+    document.querySelectorAll("video").forEach((el) => {
+      if (!isVisible(el)) return;
+      const rect = el.getBoundingClientRect();
+      candidates.push({ el, type: "video", area: rect.width * rect.height });
+    });
+
+    document.querySelectorAll('img[srcset], img[src]').forEach((el) => {
+      if (isAvatarLike(el) || !isVisible(el)) return;
+      const rect = el.getBoundingClientRect();
+      candidates.push({ el, type: "image", area: rect.width * rect.height });
+    });
+
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => b.area - a.area);
+    return candidates[0];
+  }
+
+  function ensureStoryButton() {
+    if (!isStoryOrHighlight()) {
+      if (storyBtn) {
+        storyBtn.remove();
+        storyBtn = null;
+      }
+      return;
+    }
+
+    if (storyBtn && document.body.contains(storyBtn)) return;
+
+    storyBtn = document.createElement("button");
+    storyBtn.type = "button";
+    storyBtn.className = "ig-dl-story-btn";
+    storyBtn.title = "Baixar este story";
+    storyBtn.innerHTML = DOWNLOAD_SVG;
+
+    storyBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+
+      const media = getCurrentStoryMedia();
+      if (!media) return;
+
+      const url = media.type === "video" ? media.el.currentSrc || media.el.src : getBestImageUrl(media.el);
+      downloadSingle(storyBtn, url, media.type);
+    });
+
+    document.body.appendChild(storyBtn);
+  }
+
   // ---------- loop principal ----------
 
   function scan() {
+    ensureStoryButton();
+    if (isStoryOrHighlight()) return;
+
     attachBesideSaveButtons();
     document.querySelectorAll("video").forEach((v) => attachOverlay(v, "video"));
     document.querySelectorAll('img[srcset], img[src]').forEach((img) => attachOverlay(img, "image"));
@@ -193,7 +388,7 @@
 
   const observer = new MutationObserver(() => {
     clearTimeout(window.__igDlScanTimer);
-    window.__igDlScanTimer = setTimeout(scan, 250);
+    window.__igDlScanTimer = setTimeout(scan, 200);
   });
   observer.observe(document.body, { childList: true, subtree: true });
 
