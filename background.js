@@ -17,7 +17,9 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.contextMenus.onClicked.addListener((info) => {
   if (info.menuItemId === MENU_ID && info.srcUrl) {
-    downloadMedia(info.srcUrl, guessTypeFromUrl(info.srcUrl));
+    downloadMedia(info.srcUrl, guessTypeFromUrl(info.srcUrl)).catch((err) =>
+      console.error("[IG Downloader]", err)
+    );
   }
 });
 
@@ -50,7 +52,15 @@ function guessExtension(url, type) {
   return type === "video" ? "mp4" : "jpg";
 }
 
+function isValidUrl(url) {
+  return typeof url === "string" && /^https?:\/\//.test(url);
+}
+
 function downloadMedia(url, type) {
+  if (!isValidUrl(url)) {
+    return Promise.reject("URL de mídia inválida ou vazia: " + url);
+  }
+
   const ext = guessExtension(url, type);
   const label = type === "video" ? "reel_ou_story" : "foto";
   const filename = `IG-Downloader/${label}_${Date.now()}.${ext}`;
@@ -70,8 +80,12 @@ async function downloadBatch(items) {
   const stamp = Date.now();
   for (let i = 0; i < items.length; i++) {
     const { url, type } = items[i];
+    if (!isValidUrl(url)) {
+      console.warn("[IG Downloader] item inválido no lote, pulando:", url);
+      continue;
+    }
     const ext = guessExtension(url, type);
-    const filename = `IG-Downloader/carrossel_${stamp}_${String(i + 1).padStart(2, "0")}.${ext}`;
+    const filename = `IG-Downloader/lote_${stamp}_${String(i + 1).padStart(2, "0")}.${ext}`;
     await new Promise((resolve, reject) => {
       chrome.downloads.download({ url, filename, saveAs: false }, (downloadId) => {
         if (chrome.runtime.lastError || downloadId === undefined) {

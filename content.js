@@ -14,6 +14,13 @@
     return new Promise((r) => setTimeout(r, ms));
   }
 
+  function log(...args) {
+    console.log("[IG Downloader]", ...args);
+  }
+  function warn(...args) {
+    console.warn("[IG Downloader]", ...args);
+  }
+
   function getBestImageUrl(img) {
     if (img.srcset) {
       const candidates = img.srcset
@@ -33,8 +40,26 @@
     if (el.closest('[aria-hidden="true"]')) return false;
     const rect = el.getBoundingClientRect();
     if (rect.width < 2 || rect.height < 2) return false;
+    // slides fora da tela (carrossel/stories) ficam transladados para o lado —
+    // isso muda o retângulo real do elemento, então checamos se ele
+    // realmente cruza a área visível da janela
+    if (rect.right <= 0 || rect.left >= window.innerWidth || rect.bottom <= 0 || rect.top >= window.innerHeight) {
+      return false;
+    }
     const style = getComputedStyle(el);
     return style.visibility !== "hidden" && style.display !== "none";
+  }
+
+  // menor ancestral comum entre dois elementos — usado para restringir buscas
+  // (setas de avançar/voltar) apenas ao post em questão, nunca vazando para
+  // outros posts / o perfil inteiro
+  function commonAncestor(a, b) {
+    let node = a;
+    while (node && node !== document.documentElement) {
+      if (node.contains(b)) return node;
+      node = node.parentElement;
+    }
+    return document.body;
   }
 
   function isAvatarLike(img) {
@@ -75,27 +100,86 @@
     );
   }
 
-  function findNavButton(container, re) {
-    const svg = Array.from(container.querySelectorAll("svg[aria-label]")).find((s) =>
+  function findNavButton(root, re) {
+    const svg = Array.from(root.querySelectorAll("svg[aria-label]")).find((s) =>
       re.test(s.getAttribute("aria-label") || "")
     );
     if (!svg) return null;
     return svg.closest('button, div[role="button"]') || svg.parentElement;
   }
 
+  // ---------- mecanismo de download com fallback ----------
+
+  async function downloadViaFetch(url, type, filenameBase) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const blob = await res.blob();
+      const guessedExt = (blob.type.split("/")[1] || (type === "video" ? "mp4" : "jpg")).replace("jpeg", "jpg");
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = blobUrl;
+      a.download = `${filenameBase}.${guessedExt}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 15000);
+      return true;
+    } catch (err) {
+      warn("fetch direto também falhou:", err);
+      return false;
+    }
+  }
+
+  async function performDownload(url, type) {
+    if (!url || !/^https?:\/\//.test(url)) {
+      warn("URL inválida, não é possível baixar:", url);
+      return false;
+    }
+
+    log("baixando:", url);
+
+    const resp = await new Promise((resolve) => {
+      chrome.runtime.sendMessage({ action: "download", url, type }, resolve);
+    });
+
+    if (resp?.ok) return true;
+
+    warn("falha via chrome.downloads, tentando fetch direto:", resp?.error);
+    return downloadViaFetch(url, type, `instagram_${Date.now()}`);
+  }
+
+  async function performDownloadBatch(items) {
+    if (!items.length) return false;
+
+    const resp = await new Promise((resolve) => {
+      chrome.runtime.sendMessage({ action: "downloadBatch", items }, resolve);
+    });
+
+    if (resp?.ok) return true;
+
+    warn("lote falhou via chrome.downloads, tentando fetch direto item a item:", resp?.error);
+    const stamp = Date.now();
+    let anyOk = false;
+    for (let i = 0; i < items.length; i++) {
+      const ok = await downloadViaFetch(items[i].url, items[i].type, `instagram_${stamp}_${String(i + 1).padStart(2, "0")}`);
+      anyOk = anyOk || ok;
+    }
+    return anyOk;
+  }
+
   function downloadSingle(btn, url, type) {
-    if (!url) return;
     btn.classList.add("ig-dl-loading");
-    chrome.runtime.sendMessage({ action: "download", url, type }, (resp) => {
+    performDownload(url, type).then((ok) => {
       btn.classList.remove("ig-dl-loading");
-      btn.classList.add(resp?.ok ? "ig-dl-ok" : "ig-dl-err");
+      btn.classList.add(ok ? "ig-dl-ok" : "ig-dl-err");
       setTimeout(() => btn.classList.remove("ig-dl-ok", "ig-dl-err"), 1200);
     });
   }
 
-  // ---------- menu "baixar esta / baixar todas" para carrossel ----------
+  // ---------- menu genérico "baixar esta / baixar todas" ----------
 
-  function showCarouselMenu(anchorBtn, onChoice) {
+  function showChoiceMenu(anchorBtn, labelCurrent, labelAll, onChoice) {
     document.querySelectorAll(".ig-dl-menu").forEach((m) => m.remove());
 
     const menu = document.createElement("div");
@@ -104,12 +188,12 @@
     const optCurrent = document.createElement("button");
     optCurrent.type = "button";
     optCurrent.className = "ig-dl-menu-item";
-    optCurrent.textContent = "Baixar só esta foto";
+    optCurrent.textContent = labelCurrent;
 
     const optAll = document.createElement("button");
     optAll.type = "button";
     optAll.className = "ig-dl-menu-item";
-    optAll.textContent = "Baixar todas do carrossel";
+    optAll.textContent = labelAll;
 
     const close = () => {
       menu.remove();
@@ -136,17 +220,20 @@
     document.body.appendChild(menu);
 
     const rect = anchorBtn.getBoundingClientRect();
-    menu.style.top = `${rect.bottom + window.scrollY + 6}px`;
-    menu.style.left = `${Math.min(rect.left + window.scrollX, window.innerWidth - 210)}px`;
+    const top = Math.min(rect.bottom + window.scrollY + 6, document.documentElement.scrollHeight - 90);
+    menu.style.top = `${top}px`;
+    menu.style.left = `${Math.min(rect.left + window.scrollX, window.innerWidth - 220)}px`;
 
     setTimeout(() => document.addEventListener("click", outsideClick, true), 0);
   }
 
-  async function collectCarousel(container) {
+  // ---------- carrossel de posts (feed) ----------
+
+  async function collectCarousel(scopedContainer) {
     let backSteps = 0;
     let guard = 0;
     while (guard++ < 20) {
-      const prev = findNavButton(container, PREV_RE);
+      const prev = findNavButton(scopedContainer, PREV_RE);
       if (!prev) break;
       prev.click();
       backSteps++;
@@ -157,7 +244,7 @@
     const seenUrls = new Set();
     guard = 0;
     while (guard++ < 20) {
-      const media = getMediaForContainer(container);
+      const media = getMediaForContainer(scopedContainer);
       if (media) {
         const url = media.type === "video" ? media.el.currentSrc || media.el.src : getBestImageUrl(media.el);
         if (url && !seenUrls.has(url)) {
@@ -165,14 +252,14 @@
           collected.push({ url, type: media.type });
         }
       }
-      const next = findNavButton(container, NEXT_RE);
+      const next = findNavButton(scopedContainer, NEXT_RE);
       if (!next) break;
       next.click();
       await sleep(350);
     }
 
     for (let i = 0; i < backSteps; i++) {
-      const next = findNavButton(container, NEXT_RE);
+      const next = findNavButton(scopedContainer, NEXT_RE);
       if (!next) break;
       next.click();
       await sleep(150);
@@ -210,19 +297,17 @@
     if (style.position === "static") wrapper.style.position = "relative";
 
     const btn = makeOverlayButton();
-    btn.addEventListener("click", (e) => {
+    btn.addEventListener("click", async (e) => {
       e.preventDefault();
       e.stopPropagation();
       e.stopImmediatePropagation();
 
       const url = type === "video" ? mediaEl.currentSrc || mediaEl.src : getBestImageUrl(mediaEl);
-      if (!url) return;
 
       btn.textContent = "…";
-      chrome.runtime.sendMessage({ action: "download", url, type }, (resp) => {
-        btn.textContent = resp?.ok ? "✓" : "✕";
-        setTimeout(() => (btn.textContent = "⬇"), 1500);
-      });
+      const ok = await performDownload(url, type);
+      btn.textContent = ok ? "✓" : "✕";
+      setTimeout(() => (btn.textContent = "⬇"), 1500);
     });
 
     wrapper.appendChild(btn);
@@ -257,9 +342,13 @@
       const clickable = svg.closest('button, div[role="button"], span[role="button"]') || svg.parentElement;
       if (!clickable || clickable.dataset.igDlSibling || !clickable.parentNode) return;
 
-      const container = findPostContainer(svg);
-      const media = getMediaForContainer(container);
+      const broadContainer = findPostContainer(svg);
+      const media = getMediaForContainer(broadContainer);
       if (!media) return;
+
+      // restringe a busca de setas de navegação apenas a este post
+      // (ancestral comum entre o ícone de salvar e a mídia encontrada)
+      const scoped = commonAncestor(svg, media.el);
 
       clickable.dataset.igDlSibling = "1";
       media.el.dataset.igDlDone = "1";
@@ -275,19 +364,19 @@
         e.stopPropagation();
         e.stopImmediatePropagation();
 
-        const hasCarousel = !!findNavButton(container, NEXT_RE) || !!findNavButton(container, PREV_RE);
+        const hasCarousel = !!findNavButton(scoped, NEXT_RE) || !!findNavButton(scoped, PREV_RE);
 
         if (!hasCarousel) {
-          const current = getMediaForContainer(container) || media;
+          const current = getMediaForContainer(scoped) || media;
           const url =
             current.type === "video" ? current.el.currentSrc || current.el.src : getBestImageUrl(current.el);
           downloadSingle(btn, url, current.type);
           return;
         }
 
-        showCarouselMenu(btn, async (choice) => {
+        showChoiceMenu(btn, "Baixar só esta foto", "Baixar todas do carrossel", async (choice) => {
           if (choice === "current") {
-            const current = getMediaForContainer(container) || media;
+            const current = getMediaForContainer(scoped) || media;
             const url =
               current.type === "video" ? current.el.currentSrc || current.el.src : getBestImageUrl(current.el);
             downloadSingle(btn, url, current.type);
@@ -295,7 +384,7 @@
           }
 
           btn.classList.add("ig-dl-loading");
-          const items = await collectCarousel(container);
+          const items = await collectCarousel(scoped);
           btn.classList.remove("ig-dl-loading");
 
           if (!items.length) {
@@ -304,10 +393,11 @@
             return;
           }
 
-          chrome.runtime.sendMessage({ action: "downloadBatch", items }, (resp) => {
-            btn.classList.add(resp?.ok ? "ig-dl-ok" : "ig-dl-err");
-            setTimeout(() => btn.classList.remove("ig-dl-ok", "ig-dl-err"), 1200);
-          });
+          btn.classList.add("ig-dl-loading");
+          const ok = await performDownloadBatch(items);
+          btn.classList.remove("ig-dl-loading");
+          btn.classList.add(ok ? "ig-dl-ok" : "ig-dl-err");
+          setTimeout(() => btn.classList.remove("ig-dl-ok", "ig-dl-err"), 1200);
         });
       });
 
@@ -321,6 +411,15 @@
 
   function isStoryOrHighlight() {
     return /\/stories\//.test(location.pathname);
+  }
+
+  // identifica a "sessão" atual de story (mesmo usuário ou mesmo destaque),
+  // para nunca coletar mídia de outra pessoa ao navegar
+  function getStoryOwnerKey() {
+    const parts = location.pathname.split("/").filter(Boolean);
+    if (parts[0] !== "stories") return null;
+    if (parts[1] === "highlights") return `highlights/${parts[2] || ""}`;
+    return `user/${parts[1] || ""}`;
   }
 
   function getCurrentStoryMedia() {
@@ -341,6 +440,64 @@
     if (!candidates.length) return null;
     candidates.sort((a, b) => b.area - a.area);
     return candidates[0];
+  }
+
+  async function collectStorySet() {
+    const ownerKey = getStoryOwnerKey();
+    if (!ownerKey) return [];
+
+    // volta para o primeiro item deste story/destaque
+    let backSteps = 0;
+    let guard = 0;
+    while (guard++ < 40) {
+      const prev = findNavButton(document, PREV_RE);
+      if (!prev) break;
+      prev.click();
+      await sleep(380);
+      if (getStoryOwnerKey() !== ownerKey) {
+        const next = findNavButton(document, NEXT_RE);
+        if (next) {
+          next.click();
+          await sleep(380);
+        }
+        break;
+      }
+      backSteps++;
+    }
+
+    const collected = [];
+    const seenUrls = new Set();
+    guard = 0;
+    while (guard++ < 40) {
+      if (getStoryOwnerKey() !== ownerKey) break;
+
+      const media = getCurrentStoryMedia();
+      if (media) {
+        const url = media.type === "video" ? media.el.currentSrc || media.el.src : getBestImageUrl(media.el);
+        if (url && !seenUrls.has(url)) {
+          seenUrls.add(url);
+          collected.push({ url, type: media.type });
+        }
+      }
+
+      const next = findNavButton(document, NEXT_RE);
+      if (!next) break;
+      next.click();
+      await sleep(420);
+
+      if (getStoryOwnerKey() !== ownerKey) break; // passou para o próximo usuário/destaque
+    }
+
+    // tenta voltar para a posição original
+    for (let i = 0; i < backSteps; i++) {
+      if (getStoryOwnerKey() !== ownerKey) break;
+      const next = findNavButton(document, NEXT_RE);
+      if (!next) break;
+      next.click();
+      await sleep(200);
+    }
+
+    return collected;
   }
 
   function ensureStoryButton() {
@@ -365,11 +522,41 @@
       e.stopPropagation();
       e.stopImmediatePropagation();
 
-      const media = getCurrentStoryMedia();
-      if (!media) return;
+      const hasMore = !!findNavButton(document, NEXT_RE) || !!findNavButton(document, PREV_RE);
 
-      const url = media.type === "video" ? media.el.currentSrc || media.el.src : getBestImageUrl(media.el);
-      downloadSingle(storyBtn, url, media.type);
+      if (!hasMore) {
+        const media = getCurrentStoryMedia();
+        if (!media) return;
+        const url = media.type === "video" ? media.el.currentSrc || media.el.src : getBestImageUrl(media.el);
+        downloadSingle(storyBtn, url, media.type);
+        return;
+      }
+
+      showChoiceMenu(storyBtn, "Baixar apenas esta foto", "Baixar todas as fotos do story", async (choice) => {
+        if (choice === "current") {
+          const media = getCurrentStoryMedia();
+          if (!media) return;
+          const url = media.type === "video" ? media.el.currentSrc || media.el.src : getBestImageUrl(media.el);
+          downloadSingle(storyBtn, url, media.type);
+          return;
+        }
+
+        storyBtn.classList.add("ig-dl-loading");
+        const items = await collectStorySet();
+        storyBtn.classList.remove("ig-dl-loading");
+
+        if (!items.length) {
+          storyBtn.classList.add("ig-dl-err");
+          setTimeout(() => storyBtn.classList.remove("ig-dl-err"), 1200);
+          return;
+        }
+
+        storyBtn.classList.add("ig-dl-loading");
+        const ok = await performDownloadBatch(items);
+        storyBtn.classList.remove("ig-dl-loading");
+        storyBtn.classList.add(ok ? "ig-dl-ok" : "ig-dl-err");
+        setTimeout(() => storyBtn.classList.remove("ig-dl-ok", "ig-dl-err"), 1200);
+      });
     });
 
     document.body.appendChild(storyBtn);
